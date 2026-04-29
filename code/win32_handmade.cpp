@@ -1,10 +1,29 @@
 #include <windows.h>
 #include <stdint.h>
 #include <dsound.h>
+#include <xaudio2.h>
+#include <math.h>
+#include <stdio.h>
 
-#define local_presist static
+#define local_persist static
 #define internal static
 #define global_variable static
+
+typedef int8_t int8;
+typedef int16_t int16;
+typedef int32_t int32;
+typedef int64_t int64;
+
+typedef uint8_t uint8;
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+
+
+typedef float  real32;
+typedef double real64;
+
+#include "handmade.cpp"
 
 #define DIRECT_SOUND_CREATE(name) HRESULT WINAPI name(LPCGUID pcGuidDevice,LPDIRECTSOUND *ppDS, LPUNKNOWN pUnkOuter);
 typedef DIRECT_SOUND_CREATE(direct_sound_create);
@@ -17,11 +36,13 @@ struct win32_offscreen_buffer
     int Width;
     int Height;
     int Pitch;
-    int BytesPerPixel;
 };
 
 global_variable bool GlobalRunning;
 global_variable win32_offscreen_buffer GlobalBackBuffer;
+global_variable IXAudio2SourceVoice *SourceVoice;
+global_variable XAUDIO2_BUFFER AudioBuffer;
+global_variable int16 * AudioData;
 
 struct win32_window_dimension
 {
@@ -41,15 +62,15 @@ win32_window_dimension win32GetWindowDimension(HWND Window)
 
 internal void RenderGradient(win32_offscreen_buffer *Buffer, int XOffset, int YOffset)
 {
-    uint8_t *Row = (uint8_t *)Buffer->Memory;
+    uint8 *Row = (uint8 *)Buffer->Memory;
     for (int Y = 0; Y < Buffer->Height; ++Y)
     {
 
-        uint32_t *Pixel = (uint32_t *)Row;
+        uint32 *Pixel = (uint32 *)Row;
         for (int X = 0; X < Buffer->Width; ++X)
         {
-            uint8_t BlUE = X + XOffset;
-            uint8_t Green = Y + YOffset;
+            uint8 BlUE = X + XOffset;
+            uint8 Green = Y + YOffset;
 
             *Pixel++ = (Green << 8 | BlUE);
         }
@@ -66,7 +87,7 @@ internal void win32ResizeDIBSection(win32_offscreen_buffer *Buffer, int Width, i
 
     Buffer->Width = Width;
     Buffer->Height = Height;
-    Buffer->BytesPerPixel = 4;
+    int BytesPerPixel = 4;
 
     // NOTE: when the biHeight field id -ve, this is the clue to windows
     // to treat this bit-map as top-down, not bottom-up, meaning that
@@ -79,9 +100,9 @@ internal void win32ResizeDIBSection(win32_offscreen_buffer *Buffer, int Width, i
     Buffer->Info.bmiHeader.biBitCount = 32;
     Buffer->Info.bmiHeader.biCompression = BI_RGB;
 
-    int BitmapMemorySize = (Buffer->Width * Buffer->Height) * Buffer->BytesPerPixel;
+    int BitmapMemorySize = (Buffer->Width * Buffer->Height) * BytesPerPixel;
     Buffer->Memory = VirtualAlloc(0, BitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
-    Buffer->Pitch = Width * Buffer->BytesPerPixel;
+    Buffer->Pitch = Width * BytesPerPixel;
 
     // TODO: probabaly clear this to black
 }
@@ -100,24 +121,90 @@ internal void Win32DisplayBufferInWindow(HDC DeviceContext, int WindowWidth, int
                   SRCCOPY);
 }
 
-internal void Win32InitDSound(void)
-{
-    HMODULE DSoundLibrary = LoadLibraryA("dsound.dll");
-    if (DSoundLibrary)
+// internal void Win32InitDSound(HWND Window)
+// {
+//     HMODULE DSoundLibrary = LoadLibraryA("dsound.dll");
+//     if (DSoundLibrary)
+//     {
+//         direct_sound_create *DirectSoundCreate = (direct_sound_create *) GetProcAddress(DSoundLibrary,"DirectSoundCreate");
+//         LPDIRECTSOUND DirectSound;
+//         if (DirectSoundCreate && SUCCEEDED(DirectSoundCreate(0, &DirectSound, 0)))
+//         { 
+//             if(SUCCEEDED( DirectSound->SetCooperativeLevel(Window,DSSCL_PRIORITY)))
+//             {
+
+//             }else
+//             {
+//                 // TODO: Error log
+//             }
+//         }else
+//         {
+//             // TODO: Error log
+//         }
+        
+//     }
+// }
+
+internal void win32InitXAudio(){
+    IXAudio2 *XAudio;
+    
+    if (SUCCEEDED(XAudio2Create(&XAudio,0,XAUDIO2_DEFAULT_PROCESSOR)))
     {
-        direct_sound_create *DirectSoundCreate = (direct_sound_create *) GetProcAddress(DSoundLibrary,"DirectSoundCreate");
-        LPDIRECTSOUND DirectSound;
-        if (DirectSoundCreate && SUCCEEDED(DirectSoundCreate(0, &DirectSound, 0)))
-        { 
+        IXAudio2MasteringVoice * MasteringVoice;
+        if(SUCCEEDED(XAudio->CreateMasteringVoice(&MasteringVoice,2,48000,0,0)))
+        {
+
+            tWAVEFORMATEX WaveFormat ={};
+            WaveFormat.wFormatTag = WAVE_FORMAT_PCM;
+            WaveFormat.nChannels = 2;
+            WaveFormat.nSamplesPerSec = 48000;
+            WaveFormat.wBitsPerSample = 16;
+            WaveFormat.nBlockAlign = (WaveFormat.nChannels * WaveFormat.wBitsPerSample) /8;
+            WaveFormat.nAvgBytesPerSec = WaveFormat.nSamplesPerSec * WaveFormat.nBlockAlign;
+
             
+            SourceVoice;
+           
+            if (SUCCEEDED(XAudio->CreateSourceVoice(&SourceVoice, &WaveFormat)))
+            {
+                int SamplesPerSecond = 48000;
+                int ToneHz           = 256;
+                int SampleCount      = SamplesPerSecond;
+
+                AudioData = (int16 *)VirtualAlloc(0, SampleCount * WaveFormat.nBlockAlign, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                
+
+                int16 *SampleOut = AudioData;
+                int Period = SamplesPerSecond / ToneHz;
+                int16 Volume = 3000;
+
+                for (int SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
+                {
+                    float t = (float)SampleIndex / (float)SamplesPerSecond;
+                    float Frequency = 440.0f; // A4 note
+                    int16 SampleValue = (int16)(Volume * sinf(2.0f * 3.14159f * Frequency * t));
+                    *SampleOut++ = SampleValue; 
+                    *SampleOut++ = SampleValue;
+                }
+
+                AudioBuffer.AudioBytes =WaveFormat.nSamplesPerSec * WaveFormat.nBlockAlign,
+                AudioBuffer.pAudioData = (BYTE *)AudioData;
+                AudioBuffer.Flags      = XAUDIO2_END_OF_STREAM;
+                AudioBuffer.LoopCount = XAUDIO2_LOOP_INFINITE;
+
+                SourceVoice->SubmitSourceBuffer(&AudioBuffer);
+                SourceVoice->Start(0);
+            }
+
         }else
         {
-            // TODO: Error log
+
         }
-        
+    }else
+    {
+        // TODO error handling
     }
     
-
 }
 
 LRESULT CALLBACK Win32WndprocCallback(
@@ -166,7 +253,7 @@ LRESULT CALLBACK Win32WndprocCallback(
     case WM_KEYDOWN:
     case WM_KEYUP:
     {
-        uint32_t VKCode = Wparam;
+        uint32 VKCode = Wparam;
         bool WasDown = ((Lparam & (1 << 30)) != 0);
         bool IsDown = ((Lparam & (1 << 31)) == 0);
         if (WasDown != IsDown)
@@ -177,11 +264,11 @@ LRESULT CALLBACK Win32WndprocCallback(
                 OutputDebugStringA("W:");
                 if (WasDown)
                 {
-                    OutputDebugStringA("was dow ");
+                    OutputDebugStringA("was down");
                 }
                 if (IsDown)
                 {
-                    OutputDebugStringA("is down ");
+                    OutputDebugStringA("is down");
                 }
                 OutputDebugStringA("\n");
             }
@@ -253,11 +340,16 @@ int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmd
 
     win32ResizeDIBSection(&GlobalBackBuffer, 1280, 720);
 
-    WindowClass.style = CS_HREDRAW | CS_VREDRAW;
+    WindowClass.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
     WindowClass.lpfnWndProc = Win32WndprocCallback;
     // WindoClass.hIcon = ;
     WindowClass.hInstance = hInst;
     WindowClass.lpszClassName = "HandmadeHeroWindowClass";
+
+    LARGE_INTEGER PreCounterFrequencyResult;
+    
+    QueryPerformanceFrequency(&PreCounterFrequencyResult);
+    int64 PreCounterFrequency = PreCounterFrequencyResult.QuadPart;
 
     if (RegisterClassA(&WindowClass))
     {
@@ -276,13 +368,21 @@ int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmd
             0);
         if (Window)
         {
+            // NOTE: since we specified CS_OWNDC in style tags
+            // we can get context once and use it every were
+            // becuase we are not sharing context with anyone else
+            HDC DeviceContext = GetDC(Window);
 
-            GlobalRunning = true;
             int XOffset = 0;
             int YOffset = 0;
 
-            Win32InitDSound();
+            win32InitXAudio();
 
+            GlobalRunning = true;
+
+            uint64 LastCycle = __rdtsc();
+            LARGE_INTEGER LastCounter;
+            QueryPerformanceCounter(&LastCounter); 
             while (GlobalRunning)
             {
                 MSG Message;
@@ -296,15 +396,38 @@ int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE hInstPrev, PSTR cmdline, int cmd
                     TranslateMessage(&Message);
                     DispatchMessageA(&Message);
                 }
-                RenderGradient(&GlobalBackBuffer, XOffset, YOffset);
+                game_offscreen_buffer Buffer = {};
+                Buffer.Memory = GlobalBackBuffer.Memory;
+                Buffer.Width = GlobalBackBuffer.Width;
+                Buffer.Height = GlobalBackBuffer.Height;
+                Buffer.Pitch  = GlobalBackBuffer.Pitch; 
+                GameUpdateRende(&Buffer,XOffset,YOffset);
 
-                HDC DeviceContext = GetDC(Window);
+                
                 win32_window_dimension Dimension = win32GetWindowDimension(Window);
                 Win32DisplayBufferInWindow(DeviceContext, Dimension.Width, Dimension.Height, &GlobalBackBuffer);
                 ReleaseDC(Window, DeviceContext);
 
                 ++XOffset;
                 ++YOffset;
+
+                uint64 EndCycle = __rdtsc();
+                uint64 CycleElapsed = EndCycle - LastCycle;
+
+                LARGE_INTEGER EndCounter;
+                QueryPerformanceCounter(&EndCounter); 
+                int64 CounterElapsed = EndCounter.QuadPart - LastCounter.QuadPart;  
+                real32 MSPerFrame = ((1000.0f*(real32)CounterElapsed)/(real32)PreCounterFrequency);
+                real32 FPS = (real32)PreCounterFrequency/(real32)CounterElapsed;
+                real32 MCPF = ((real32)CycleElapsed/(1000.0f*1000.0f));
+
+                char StrBuffer[256];
+                sprintf(StrBuffer,"%.02fms %.02fFPS %.02fc\n",MSPerFrame,FPS,MCPF);
+                OutputDebugStringA(StrBuffer);
+
+                LastCounter = EndCounter;
+                LastCycle = EndCycle;
+
             }
         }
         else
